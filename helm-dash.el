@@ -70,6 +70,67 @@ of docsets are active.  Between 0 and 3 is sane."
 (defvar helm-dash-common-docsets
   '() "List of Docsets to search active by default.")
 
+(defvar-local helm-dash-docsets '()
+  "Buffer-local docsets, retrieved by
+`helm-dash-buffer-local-docsets'. If the current buffer-local
+value is nil, `helm-dash' would try to populate it according to
+`helm-dash-docset-conditions-table'.")
+
+(defvar helm-dash-docset-conditions-table
+  (let ((table (make-hash-table :test #'equal)))
+    (puthash "Python 2"
+             '((mode . python-mode)
+               ((mode . web-mode)
+                (web-mode-engine . "django")))
+             table)
+    (puthash "HTML"
+             '((mode . (html-mode nxml-mode web-mode)))
+             table)
+    (puthash "JavaScript"
+             '((mode . (html-mode web-mode js-mode js2-mode)))
+             table)
+    table)
+  "Docset conditionals table. A docset is included into
+`helm-dash-docsets' if one of its conditions are met. Note that
+this variable is used only when `helm-dash-docsets' is
+populated for the first time.
+
+TODO more documentations on conditions and better setting
+facility for users.")
+
+(defun helm-dash-reset-local-docsets ()
+  "Reset local docsets according to
+`helm-dash-docset-conditions-alist'."
+  (interactive)
+  (setq
+   helm-dash-docsets
+   (loop for doc in (hash-table-keys helm-dash-docset-conditions-table)
+         when (-some?
+               (lambda (cond)
+                 (pcase (car cond)
+                   (`mode
+                    (if (listp (cdr cond))
+                        (-some? (lambda (mode)
+                                  (derived-mode-p mode))
+                                (cdr cond))
+                      (derived-mode-p (cdr cond))))
+                   ((pred consp)
+                    (-all?
+                     (lambda (c)
+                       (pcase (car c)
+                         (`mode
+                          (derived-mode-p (cdr c)))
+                         ((pred symbolp)
+                          (equal (eval (car c))
+                                 (cdr c)))
+                         (_
+                          (error "Sub-Condition type not supported"))))
+                     cond))
+                   (_
+                    (error "Condition type not supported"))))
+               (gethash doc helm-dash-docset-conditions-table))
+         collect doc))
+  helm-dash-docsets)
 
 (defun helm-dash-docset-path (docset)
   "Return the full path of the directory for DOCSET."
@@ -192,12 +253,20 @@ Report an error unless a valid docset is selected."
     (completing-read (format "%s (%s): " prompt (car choices))
                      choices nil t nil nil choices)))
 
-(defun helm-dash-activate-docset (docset)
-  "Activate DOCSET.  If called interactively prompts for the docset name."
+(defun helm-dash-activate-docset (docset &optional common-p)
+  "Activate DOCSET.  If called interactively prompts for the docset name.
+
+When called interactively with a prefix, DOCSET is activated in
+the `helm-dash-common-docsets', otherwise it's only the local
+`helm-dash-docsets'."
   (interactive (list (helm-dash-read-docset
                       "Activate docset"
-                      (helm-dash-installed-docsets))))
-  (add-to-list 'helm-dash-common-docsets docset)
+                      (helm-dash-installed-docsets))
+                     current-prefix-arg))
+  (add-to-list (if common-p
+                   'helm-dash-common-docsets
+                 'helm-dash-docsets)
+               docset)
   (helm-dash-reset-connections))
 
 ;;;###autoload
@@ -229,9 +298,8 @@ Report an error unless a valid docset is selected."
           (helm-dash-docset-folder-name
            (shell-command-to-string
             (format "tar axvf %s -C %s" path docset-root))))
-    (helm-dash-activate-docset docset-folder)
     (message (format
-              "Docset installed. Add \"%s\" to helm-dash-common-docsets or helm-dash-docsets."
+              "Docset \"%s\" installed. You need to activate it before use."
               docset-folder))))
 
 (defalias 'helm-dash-update-docset 'helm-dash-install-docset)
@@ -359,6 +427,11 @@ Get required params to call `helm-dash-result-url' from SEARCH-RESULT."
 (defun helm-dash ()
   "Bring up a Dash search interface in helm."
   (interactive)
+  (unless (helm-dash-buffer-local-docsets)
+    (helm-dash-reset-local-docsets))
+  (unless (or helm-dash-common-docsets
+              helm-dash-docsets)
+    (error "No docsets available for current buffer."))
   (helm-dash-create-common-connections)
   (helm-dash-create-buffer-connections)
   (helm :sources (list (helm-source-dash-search))
